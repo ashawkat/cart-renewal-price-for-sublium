@@ -2,7 +2,7 @@
 /**
  * Main plugin class — price sync only.
  *
- * @package Sublium_Cart_Renewal_Price
+ * @package Cart_Renewal_Price_For_Sublium
  */
 
 defined( 'ABSPATH' ) || exit;

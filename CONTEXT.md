@@ -1,4 +1,4 @@
-# Sublium Cart Renewal Price — build context
+# Cart Renewal Price for Sublium — build context
 
 ## Why this plugin exists
 
@@ -59,6 +59,8 @@ This plugin’s **only job**: make Sublium Subscribe & Save **renewal / subscrip
 
 ## Suggested slug / name
 
-- Folder: `sublium-cart-renewal-price`
-- Plugin name: **Sublium Cart Renewal Price**
-- Text domain: `sublium-cart-renewal-price`
+Use **for Sublium** as a postfix (do not start the name or slug with Sublium — trademark / directory ban risk).
+
+- Folder: `cart-renewal-price-for-sublium`
+- Plugin name: **Cart Renewal Price for Sublium**
+- Text domain: `cart-renewal-price-for-sublium`

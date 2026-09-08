@@ -1,4 +1,4 @@
-=== Sublium Cart Renewal Price ===
+=== Cart Renewal Price for Sublium ===
 Contributors: betatech
 Tags: sublium, woocommerce, subscription, renewal, subscribe and save
 Requires at least: 6.0
@@ -16,6 +16,8 @@ Use the cart Subscribe & Save line price for Sublium renewal / subscription tota
 
 Sublium often rebuilds recurring totals from the product variation price. If your cart shows a custom Subscribe & Save amount (for example $199.98) but the subscription stores the full variation total (for example $299.97), this plugin syncs the recurring unit price from the main cart line.
 
+This is a third-party plugin by Betatech. It is not affiliated with Sublium.
+
 **What it does**
 
 * Syncs Sublium recurring calculation to cart `line_subtotal / qty`
@@ -32,8 +34,8 @@ Requires **WooCommerce** and **Sublium**.
 
 == Installation ==
 
-1. Upload the `sublium-cart-renewal-price` folder to `/wp-content/plugins/`
-2. Activate **Sublium Cart Renewal Price**
+1. Upload the `cart-renewal-price-for-sublium` folder to `/wp-content/plugins/`
+2. Activate **Cart Renewal Price for Sublium**
 3. Keep **Auto Apply Cart Coupon** separate if you use first-month gifts
 
 == Changelog ==
