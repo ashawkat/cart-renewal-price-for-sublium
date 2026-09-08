@@ -13,4 +13,4 @@ See [CONTEXT.md](CONTEXT.md) for full history and constraints.
 
 ## Safety
 
-Price filters only. No plan stripping. No subscription group changes.
+No plan stripping. No subscription group changes. Recurring carts are not mutated during checkout. Parent-order line totals are copied onto the subscription only after Sublium has created it.

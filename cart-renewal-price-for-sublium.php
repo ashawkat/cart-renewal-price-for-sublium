@@ -3,7 +3,7 @@
  * Plugin Name:       Cart Renewal Price for Sublium
  * Plugin URI:        https://betatech.co/
  * Description:       Makes Sublium Subscribe & Save renewal / subscription totals use the cart line price instead of the raw variation price. Does not alter plan assignment. Not affiliated with Sublium.
- * Version:           1.0.0
+ * Version:           1.0.1
  * Requires at least: 6.0
  * Requires PHP:      7.4
  * Author:            Betatech
@@ -20,7 +20,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'SCRP_VERSION', '1.0.0' );
+define( 'SCRP_VERSION', '1.0.1' );
 define( 'SCRP_FILE', __FILE__ );
 define( 'SCRP_PATH', plugin_dir_path( __FILE__ ) );
 

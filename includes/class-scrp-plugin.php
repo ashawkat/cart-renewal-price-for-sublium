@@ -2,9 +2,12 @@
 /**
  * Main plugin class — price sync only.
  *
- * Fail-open: never throw, never touch plan meta / groups / assignment.
- * A thrown filter during Sublium recurring-cart totals leaves recurring carts
- * uncached, and Sublium then creates no subscription.
+ * Creation-safe: do not mutate Sublium recurring carts, plan meta, or item
+ * payloads during checkout. Those paths can leave recurring carts uncached
+ * and Sublium then creates no subscription.
+ *
+ * Checkout HTML may still show the cart line. Stored renewal totals are
+ * copied from the parent order after the subscription already exists.
  *
  * @package Cart_Renewal_Price_For_Sublium
  */
@@ -29,6 +32,13 @@ class SCRP_Plugin {
 	private static $instance = null;
 
 	/**
+	 * Subscription IDs already synced this request.
+	 *
+	 * @var array<int, bool>
+	 */
+	private $synced_subscription_ids = array();
+
+	/**
 	 * @return SCRP_Plugin
 	 */
 	public static function instance() {
@@ -43,50 +53,14 @@ class SCRP_Plugin {
 	 * Constructor.
 	 */
 	private function __construct() {
-		// Recurring cart unit price (feeds checkout renewal + subscription totals).
-		add_filter( 'sublium_wcs_subscription_price', array( $this, 'sync_recurring_unit_price' ), 20, 4 );
-
-		// Checkout renewal display fallback.
+		// Display only — does not feed subscription create().
 		add_filter( 'sublium_wcs_woocommerce_cart_item_total', array( $this, 'filter_recurring_total_display' ), 20, 2 );
 
-		// When Sublium builds subscription line items from the recurring cart.
-		add_filter( 'sublium_wcs_create_subscription_item_data', array( $this, 'sync_subscription_item_data' ), 20, 4 );
-	}
-
-	/**
-	 * During recurring totals, use main cart line_subtotal / qty.
-	 *
-	 * @param float      $price            Calculated unit price.
-	 * @param WC_Product $product          Product.
-	 * @param mixed      $plan             Plan object.
-	 * @param string     $calculation_type Sublium calculation type.
-	 * @return float
-	 */
-	public function sync_recurring_unit_price( $price, $product, $plan = null, $calculation_type = 'none' ) {
-		try {
-			if ( 'recurring_total' !== $calculation_type ) {
-				return $price;
-			}
-
-			if ( ! $this->is_subscribe_and_save_plan( $plan ) ) {
-				return $price;
-			}
-
-			if ( ! $product instanceof WC_Product || ! $this->get_main_cart() ) {
-				return $price;
-			}
-
-			$original  = (float) $price;
-			$cart_unit = $this->get_main_cart_unit_price_for_product( $product );
-
-			if ( ! $this->should_replace_price( $original, $cart_unit ) ) {
-				return $price;
-			}
-
-			return (float) $cart_unit;
-		} catch ( \Throwable $e ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
-			return $price;
-		}
+		// After the subscription exists. Fail-open: never throw out to Sublium.
+		add_action( 'sublium_wcs_subscription_created', array( $this, 'on_subscription_created' ), 25, 2 );
+		add_filter( 'sublium_wcs_subscription_created', array( $this, 'filter_subscription_created' ), 25, 2 );
+		add_action( 'woocommerce_checkout_order_processed', array( $this, 'on_order_processed' ), 60, 1 );
+		add_action( 'woocommerce_store_api_checkout_order_processed', array( $this, 'on_order_processed' ), 60, 1 );
 	}
 
 	/**
@@ -140,73 +114,316 @@ class SCRP_Plugin {
 	}
 
 	/**
-	 * Align subscription item totals with main cart line when creating the subscription.
+	 * @param mixed         $subscription Subscription.
+	 * @param WC_Order|null $order        Parent order.
+	 * @return void
+	 */
+	public function on_subscription_created( $subscription, $order = null ) {
+		try {
+			$this->sync_subscription_from_parent_order( $subscription, $order );
+		} catch ( \Throwable $e ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
+			return;
+		}
+	}
+
+	/**
+	 * Must always return the subscription so later filters still receive it.
 	 *
-	 * Only price fields are changed. Plan, quantity, product, variation, and meta stay intact.
+	 * @param mixed         $subscription Subscription.
+	 * @param WC_Order|null $order        Parent order.
+	 * @return mixed
+	 */
+	public function filter_subscription_created( $subscription, $order = null ) {
+		try {
+			$this->sync_subscription_from_parent_order( $subscription, $order );
+		} catch ( \Throwable $e ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
+			return $subscription;
+		}
+
+		return $subscription;
+	}
+
+	/**
+	 * Backup: order is saved, subscriptions should exist.
 	 *
-	 * @param array      $item_data Subscription item data.
-	 * @param WC_Product $product   Product.
-	 * @param array      $values    Cart item values.
-	 * @param mixed      $item      Order item context.
+	 * @param int|WC_Order $order Order.
+	 * @return void
+	 */
+	public function on_order_processed( $order ) {
+		try {
+			$order = $order instanceof WC_Order ? $order : wc_get_order( $order );
+			if ( ! $order ) {
+				return;
+			}
+
+			foreach ( $this->get_subscription_ids_for_order( $order ) as $subscription_id ) {
+				$this->sync_subscription_from_parent_order( $subscription_id, $order );
+			}
+		} catch ( \Throwable $e ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
+			return;
+		}
+	}
+
+	/**
+	 * Copy parent order line_subtotal onto matching subscription product rows.
+	 *
+	 * @param mixed         $subscription Subscription object or ID.
+	 * @param WC_Order|null $order        Parent order.
+	 * @return void
+	 */
+	private function sync_subscription_from_parent_order( $subscription, $order = null ) {
+		try {
+			$subscription = $this->normalize_subscription( $subscription );
+			if ( ! $subscription ) {
+				return;
+			}
+
+			$subscription_id = method_exists( $subscription, 'get_id' ) ? (int) $subscription->get_id() : 0;
+			if ( $subscription_id && isset( $this->synced_subscription_ids[ $subscription_id ] ) ) {
+				return;
+			}
+
+			if ( method_exists( $subscription, 'get_plan_type' ) ) {
+				$plan_type = (int) $subscription->get_plan_type();
+				if ( $plan_type && self::PLAN_TYPE_SUBSCRIBE_AND_SAVE !== $plan_type ) {
+					return;
+				}
+			}
+
+			if ( ! $order instanceof WC_Order ) {
+				$parent_id = 0;
+				if ( method_exists( $subscription, 'get_parent_order_id' ) ) {
+					$parent_id = (int) $subscription->get_parent_order_id();
+				}
+				$order = $parent_id ? wc_get_order( $parent_id ) : null;
+			}
+
+			if ( ! $order instanceof WC_Order ) {
+				return;
+			}
+
+			$items = array();
+			if ( method_exists( $subscription, 'get_subscription_items' ) ) {
+				$items = $subscription->get_subscription_items();
+			}
+
+			if ( empty( $items ) || ! is_array( $items ) ) {
+				return;
+			}
+
+			$changed = false;
+
+			foreach ( $items as $item ) {
+				if ( ! is_array( $item ) || empty( $item['id'] ) ) {
+					continue;
+				}
+
+				$item_type = isset( $item['item_type'] ) ? (int) $item['item_type'] : 1;
+				if ( 1 !== $item_type ) {
+					continue;
+				}
+
+				$item_data  = $this->decode_item_data( isset( $item['item_data'] ) ? $item['item_data'] : array() );
+				$order_item = $this->find_matching_order_item( $order, $item, $item_data );
+
+				if ( ! $order_item ) {
+					continue;
+				}
+
+				$line = (float) $order_item->get_subtotal();
+				if ( $line <= 0 ) {
+					continue;
+				}
+
+				$current = isset( $item_data['total'] ) ? (float) $item_data['total'] : 0.0;
+				if ( $current > 0 && $line >= $current ) {
+					continue;
+				}
+
+				$item_data['total']    = $line;
+				$item_data['subtotal'] = $line;
+
+				if ( ! method_exists( $subscription, 'update_item' ) ) {
+					continue;
+				}
+
+				$subscription->update_item(
+					$item['id'],
+					array(
+						'item_data'   => wp_json_encode( $item_data ),
+						'base_totals' => $line,
+					),
+					array( '%s', '%f' )
+				);
+				$changed = true;
+			}
+
+			if ( ! $changed ) {
+				return;
+			}
+
+			if ( class_exists( '\Sublium_WCS\Includes\Controller\Subscriptions\Subscriptionmodifier' ) ) {
+				$modifier = new \Sublium_WCS\Includes\Controller\Subscriptions\Subscriptionmodifier( $subscription );
+				if ( method_exists( $modifier, 'recalculate_totals' ) ) {
+					$modifier->recalculate_totals();
+				}
+			} elseif ( method_exists( $subscription, 'update_totals' ) && method_exists( $subscription, 'save' ) ) {
+				$new_total = 0.0;
+				foreach ( $subscription->get_subscription_items() as $row ) {
+					$type = isset( $row['item_type'] ) ? (int) $row['item_type'] : 0;
+					if ( 1 !== $type && 2 !== $type && 4 !== $type ) {
+						continue;
+					}
+					$data       = $this->decode_item_data( isset( $row['item_data'] ) ? $row['item_data'] : array() );
+					$new_total += isset( $data['total'] ) ? (float) $data['total'] : ( isset( $data['amount'] ) ? (float) $data['amount'] : 0.0 );
+				}
+				if ( $new_total > 0 ) {
+					$subscription->update_totals( $new_total );
+					$subscription->save();
+				}
+			}
+
+			if ( $subscription_id ) {
+				$this->synced_subscription_ids[ $subscription_id ] = true;
+			}
+		} catch ( \Throwable $e ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
+			return;
+		}
+	}
+
+	/**
+	 * @param mixed $item_data Item data JSON or array.
 	 * @return array
 	 */
-	public function sync_subscription_item_data( $item_data, $product, $values, $item ) {
-		unset( $item );
-
-		try {
-			if ( ! is_array( $item_data ) || ! is_array( $values ) ) {
-				return $item_data;
-			}
-
-			if ( $this->should_skip_cart_item( $values ) ) {
-				return $item_data;
-			}
-
-			if ( ! $this->cart_item_is_subscribe_and_save( $values ) ) {
-				return $item_data;
-			}
-
-			$qty = isset( $values['quantity'] ) ? (float) $values['quantity'] : 1;
-			if ( $qty <= 0 ) {
-				return $item_data;
-			}
-
-			$unit = null;
-			if ( $product instanceof WC_Product ) {
-				$unit = $this->get_main_cart_unit_price_for_product( $product );
-			}
-
-			if ( null === $unit || $unit <= 0 ) {
-				return $item_data;
-			}
-
-			$line_total = $unit * $qty;
-			$current    = isset( $item_data['total'] ) ? (float) $item_data['total'] : 0.0;
-
-			if ( ! $this->should_replace_price( $current, $line_total ) ) {
-				return $item_data;
-			}
-
-			if ( isset( $item_data['total'] ) ) {
-				$item_data['total'] = $line_total;
-			}
-
-			if ( isset( $item_data['subtotal'] ) ) {
-				$item_data['subtotal'] = $line_total;
-			}
-
-			if ( isset( $item_data['price'] ) ) {
-				$item_data['price'] = $unit;
-			}
-
-			if ( isset( $item_data['item_price'] ) ) {
-				$item_data['item_price'] = $line_total;
-			}
-
-			return $item_data;
-		} catch ( \Throwable $e ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
+	private function decode_item_data( $item_data ) {
+		if ( is_array( $item_data ) ) {
 			return $item_data;
 		}
+
+		if ( is_string( $item_data ) && '' !== $item_data ) {
+			$decoded = json_decode( $item_data, true );
+			if ( JSON_ERROR_NONE === json_last_error() && is_array( $decoded ) ) {
+				return $decoded;
+			}
+		}
+
+		return array();
+	}
+
+	/**
+	 * @param WC_Order $order     Parent order.
+	 * @param array    $sub_item  Subscription item row.
+	 * @param array    $item_data Decoded item_data.
+	 * @return WC_Order_Item_Product|null
+	 */
+	private function find_matching_order_item( $order, $sub_item, $item_data ) {
+		$product_id   = (int) ( $item_data['product_id'] ?? $sub_item['product_id'] ?? 0 );
+		$variation_id = (int) ( $item_data['variation_id'] ?? $sub_item['variation_id'] ?? 0 );
+
+		foreach ( $order->get_items( 'line_item' ) as $order_item ) {
+			if ( ! $order_item instanceof WC_Order_Item_Product ) {
+				continue;
+			}
+
+			if ( $this->is_giveaway_order_item( $order_item ) ) {
+				continue;
+			}
+
+			$oid = (int) $order_item->get_product_id();
+			$vid = (int) $order_item->get_variation_id();
+
+			if ( $variation_id > 0 && $vid === $variation_id ) {
+				return $order_item;
+			}
+
+			if ( $product_id > 0 && $oid === $product_id ) {
+				return $order_item;
+			}
+		}
+
+		return null;
+	}
+
+	/**
+	 * @param WC_Order_Item_Product $item Order item.
+	 * @return bool
+	 */
+	private function is_giveaway_order_item( $item ) {
+		if ( 'wt_give_away_product' === (string) $item->get_meta( 'free_product', true ) ) {
+			return true;
+		}
+
+		foreach ( array( '_fkcart_free_gift', '_tikva_free_gift' ) as $key ) {
+			$value = $item->get_meta( $key, true );
+			if ( ! empty( $value ) && 'no' !== $value && '0' !== (string) $value ) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	/**
+	 * @param mixed $subscription Subscription.
+	 * @return object|null
+	 */
+	private function normalize_subscription( $subscription ) {
+		if ( is_object( $subscription ) ) {
+			return $subscription;
+		}
+
+		$id = absint( $subscription );
+		if ( ! $id ) {
+			return null;
+		}
+
+		if ( function_exists( 'sublium_get_subscription' ) ) {
+			$object = sublium_get_subscription( $id );
+			if ( $object ) {
+				return $object;
+			}
+		}
+
+		if ( class_exists( '\Sublium_WCS\Includes\Controller\Subscriptions\Subscription' ) ) {
+			try {
+				return new \Sublium_WCS\Includes\Controller\Subscriptions\Subscription( $id );
+			} catch ( \Throwable $e ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
+				return null;
+			}
+		}
+
+		return null;
+	}
+
+	/**
+	 * @param WC_Order $order Order.
+	 * @return array<int>
+	 */
+	private function get_subscription_ids_for_order( $order ) {
+		$ids = array();
+
+		$parent_meta = $order->get_meta( '_sublium_wcs_parent_order', true );
+		if ( ! empty( $parent_meta ) ) {
+			$decoded = is_array( $parent_meta ) ? $parent_meta : json_decode( $parent_meta, true );
+			if ( is_array( $decoded ) ) {
+				$ids = array_merge( $ids, $decoded );
+			}
+		}
+
+		foreach ( $order->get_meta( '_sublium_wcs_subscription_id', false ) as $meta ) {
+			if ( is_object( $meta ) && isset( $meta->value ) ) {
+				$ids[] = $meta->value;
+			} elseif ( is_numeric( $meta ) ) {
+				$ids[] = $meta;
+			}
+		}
+
+		$single = $order->get_meta( '_sublium_wcs_subscription_id', true );
+		if ( $single ) {
+			$ids[] = $single;
+		}
+
+		return array_values( array_unique( array_filter( array_map( 'absint', $ids ) ) ) );
 	}
 
 	/**
@@ -260,8 +477,6 @@ class SCRP_Plugin {
 	}
 
 	/**
-	 * Whether a cart item must be ignored for price sync.
-	 *
 	 * @param array $cart_item Cart item.
 	 * @return bool
 	 */
@@ -282,8 +497,6 @@ class SCRP_Plugin {
 	}
 
 	/**
-	 * Exact product/variation match — no parent-id fallback.
-	 *
 	 * @param WC_Product $product   Product being priced.
 	 * @param array      $cart_item Main cart item.
 	 * @return bool
@@ -304,65 +517,10 @@ class SCRP_Plugin {
 			return true;
 		}
 
-		return ( $product_id === $item_product_id && 0 === $item_variation_id );
+		return ( $product_id === $item_product_id );
 	}
 
 	/**
-	 * Replace only when Sublium has a positive price and cart unit is lower.
-	 *
-	 * @param float      $current   Sublium / current price.
-	 * @param float|null $candidate Cart unit or line total.
-	 * @return bool
-	 */
-	private function should_replace_price( $current, $candidate ) {
-		if ( null === $candidate ) {
-			return false;
-		}
-
-		$current   = (float) $current;
-		$candidate = (float) $candidate;
-
-		if ( $candidate <= 0 || $current <= 0 ) {
-			return false;
-		}
-
-		return $candidate < $current;
-	}
-
-	/**
-	 * @param mixed $plan Plan object.
-	 * @return bool
-	 */
-	private function is_subscribe_and_save_plan( $plan ) {
-		if ( ! is_object( $plan ) || ! method_exists( $plan, 'get_type' ) ) {
-			return false;
-		}
-
-		return self::PLAN_TYPE_SUBSCRIBE_AND_SAVE === (int) $plan->get_type();
-	}
-
-	/**
-	 * @param array $cart_item Cart item.
-	 * @return bool
-	 */
-	private function cart_item_is_subscribe_and_save( $cart_item ) {
-		if ( empty( $cart_item['sublium_wcs_plan'] ) ) {
-			return false;
-		}
-
-		if ( ! class_exists( '\Sublium_WCS\Includes\Main\Plans' ) ) {
-			return false;
-		}
-
-		$product = ( isset( $cart_item['data'] ) && $cart_item['data'] instanceof WC_Product ) ? $cart_item['data'] : null;
-		$plan    = \Sublium_WCS\Includes\Main\Plans::get_plan_by_id( $cart_item['sublium_wcs_plan'], $product );
-
-		return $this->is_subscribe_and_save_plan( $plan );
-	}
-
-	/**
-	 * Main WooCommerce cart (not a Sublium recurring clone).
-	 *
 	 * @return WC_Cart|null
 	 */
 	private function get_main_cart() {
@@ -370,19 +528,10 @@ class SCRP_Plugin {
 			return null;
 		}
 
-		$cart = WC()->cart;
-
-		// Recurring clones carry sublium_wcs_plan on the cart object itself.
-		if ( is_object( $cart ) && isset( $cart->sublium_wcs_plan ) && ! empty( $cart->sublium_wcs_plan ) ) {
-			return null;
-		}
-
-		return $cart;
+		return WC()->cart;
 	}
 
 	/**
-	 * Cart contents without triggering a session reload / totals recalc.
-	 *
 	 * @param WC_Cart $cart Cart.
 	 * @return array
 	 */
@@ -400,8 +549,6 @@ class SCRP_Plugin {
 	}
 
 	/**
-	 * Explicit giveaway markers only.
-	 *
 	 * @param array $cart_item Cart item.
 	 * @return bool
 	 */
