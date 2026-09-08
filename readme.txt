@@ -4,7 +4,7 @@ Tags: sublium, woocommerce, subscription, renewal, subscribe and save
 Requires at least: 6.0
 Tested up to: 6.8
 Requires PHP: 7.4
-Stable tag: 1.0.1
+Stable tag: 1.0.2
 WC requires at least: 7.0
 WC tested up to: 9.6
 License: GPLv3 or later
@@ -39,6 +39,9 @@ Requires **WooCommerce** and **Sublium**.
 3. Keep **Auto Apply Cart Coupon** separate if you use first-month gifts
 
 == Changelog ==
+
+= 1.0.2 =
+* Declared WooCommerce High-Performance Order Storage (HPOS) compatibility
 
 = 1.0.1 =
 * Fix: copy parent order line totals onto the Sublium subscription after it is created
