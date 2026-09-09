@@ -102,7 +102,9 @@ class SCRP_Plugin {
 	/**
 	 * Keep the cart line unit. Do not apply plan discount or billing-length division.
 	 *
-	 * Only during recurring_total, and only when we have a cart line to preserve.
+	 * Only while Sublium is rebuilding recurring carts. This same filter is also
+	 * used for the line-item “Billed …” string and the first-order plan price —
+	 * skipping those would show the raw variation total (e.g. $299.97).
 	 *
 	 * @param bool       $skip    Whether to skip.
 	 * @param float      $price   Incoming price.
@@ -113,6 +115,10 @@ class SCRP_Plugin {
 	public function filter_skip_plan_discount( $skip, $price, $product, $plan ) {
 		try {
 			if ( $skip ) {
+				return $skip;
+			}
+
+			if ( ! $this->is_recurring_total_calc( null ) ) {
 				return $skip;
 			}
 

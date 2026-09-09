@@ -4,7 +4,7 @@ Tags: sublium, woocommerce, subscription, renewal, subscribe and save
 Requires at least: 6.0
 Tested up to: 6.8
 Requires PHP: 7.4
-Stable tag: 1.0.3
+Stable tag: 1.0.4
 WC requires at least: 7.0
 WC tested up to: 9.6
 License: GPLv3 or later
@@ -60,6 +60,9 @@ It is designed not to. Official price hooks fail open. Plan meta and subscriptio
 Yes. Compatibility with WooCommerce custom order tables is declared on `before_woocommerce_init`.
 
 == Changelog ==
+
+= 1.0.4 =
+* Only skip Sublium plan discounts while rebuilding recurring totals, so checkout line items still show the plan price
 
 = 1.0.3 =
 * Use Sublium’s subscription product price and skip-plan-discount hooks so stored renewal lines keep the cart unit price

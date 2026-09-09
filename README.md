@@ -102,6 +102,9 @@ No. Activate it on a site that already has WooCommerce and Sublium.
 
 ## Changelog
 
+### 1.0.4
+- Only skip Sublium plan discounts while rebuilding recurring totals, so checkout line items still show the plan price
+
 ### 1.0.3
 - Use Sublium’s `sublium_wcs_subscription_product_price` and `sublium_wcs_skip_plan_discount` so stored renewal lines keep the cart unit price
 
