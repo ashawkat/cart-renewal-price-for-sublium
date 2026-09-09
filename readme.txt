@@ -4,7 +4,7 @@ Tags: sublium, woocommerce, subscription, renewal, subscribe and save
 Requires at least: 6.0
 Tested up to: 6.8
 Requires PHP: 7.4
-Stable tag: 1.0.2
+Stable tag: 1.0.3
 WC requires at least: 7.0
 WC tested up to: 9.6
 License: GPLv3 or later
@@ -22,7 +22,8 @@ This plugin exists so that gap can be fixed **without** touching Sublium plan as
 
 = What it does =
 
-* After Sublium creates the subscription, copies the parent order line subtotal onto the matching subscription row
+* During Sublium recurring totals, feeds the cart line unit via `sublium_wcs_subscription_product_price` and keeps it with `sublium_wcs_skip_plan_discount` (only for that product)
+* After the subscription exists, copies the parent order line subtotal if it is still lower (backup)
 * Updates checkout Renewal Price HTML from the cart line when possible
 * Skips explicit giveaways / free gifts
 * Declares WooCommerce HPOS compatibility
@@ -31,7 +32,7 @@ This plugin exists so that gap can be fixed **without** touching Sublium plan as
 
 * Does not strip or change Sublium plans
 * Does not alter subscription groups
-* Does not mutate Sublium recurring carts during checkout
+* Does not skip plan discounts globally
 * Does not manage coupons or first-month gifts (use Auto Apply Cart Coupon for that)
 
 Requires **WooCommerce** and **Sublium**.
@@ -52,13 +53,16 @@ No. It is built by Betatech for stores that already run Sublium.
 
 = Will it stop subscriptions from being created? =
 
-It is designed not to. Recurring carts and plan meta are not changed during checkout. Price sync runs only after the subscription exists.
+It is designed not to. Official price hooks fail open. Plan meta and subscription groups are never changed.
 
 = Does it support HPOS? =
 
 Yes. Compatibility with WooCommerce custom order tables is declared on `before_woocommerce_init`.
 
 == Changelog ==
+
+= 1.0.3 =
+* Use Sublium’s subscription product price and skip-plan-discount hooks so stored renewal lines keep the cart unit price
 
 = 1.0.2 =
 * Declared WooCommerce High-Performance Order Storage (HPOS) compatibility

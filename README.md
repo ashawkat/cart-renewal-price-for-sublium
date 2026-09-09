@@ -32,7 +32,8 @@ Putting this logic inside **Auto Apply Cart Coupon** was unsafe: combining gift/
 
 ## What it does
 
-- Copies the **parent order line subtotal** onto the matching Sublium subscription after checkout
+- Feeds the **cart line unit** into Sublium recurring totals via `sublium_wcs_subscription_product_price` and `sublium_wcs_skip_plan_discount` (official hooks)
+- Copies the **parent order line subtotal** onto the matching Sublium subscription after checkout (backup)
 - Updates checkout **Renewal Price** HTML from the cart line when possible
 - Leaves Subscribe & Save **plan assignment** alone
 - Skips giveaways / free gifts (WebToffee, FunnelKit cart gifts)
@@ -44,7 +45,7 @@ Putting this logic inside **Auto Apply Cart Coupon** was unsafe: combining gift/
 - Does not change Sublium subscription groups
 - Does not exclude products from plan assignment
 - Does not manage coupons or first-month gifts (use [Auto Apply Cart Coupon](https://github.com/ashawkat/auto-apply-cart-coupon) for that)
-- Does not mutate Sublium’s recurring cart during checkout (that path can block subscription creation)
+- Does not skip Sublium plan discounts globally (only while preserving a cart line on recurring totals)
 
 ---
 
@@ -71,12 +72,12 @@ No settings screen. If WooCommerce and Sublium are active, it runs.
 
 ## How it works
 
-1. Sublium creates the subscription as it normally does.
-2. This plugin reads the **parent order** line for the Subscribe & Save product.
-3. If that line is a lower, non-zero amount than the subscription row, it updates the subscription item totals and recalculates.
-4. Checkout “Renewal Price” may also be rewritten from the cart line for display only.
+1. While Sublium rebuilds the **recurring cart** (`calculation_type = recurring_total`), this plugin returns the matching WooCommerce cart line unit (`line_subtotal / qty`) on `sublium_wcs_subscription_product_price`.
+2. It then returns `true` on `sublium_wcs_skip_plan_discount` **only for that product**, so Sublium stores that unit as-is (no second plan discount, no billing-cycle division).
+3. After the subscription exists, it can still copy parent-order line subtotals if they are lower (backup).
+4. Checkout “Renewal Price” HTML may be rewritten from the cart line for display.
 
-If anything fails, the original Sublium subscription is left in place. The filter always returns the subscription object so later integrations still receive it.
+Filters fail open: any error leaves Sublium’s original price / subscription untouched. Plan meta is never stripped.
 
 ---
 
@@ -86,7 +87,7 @@ If anything fails, the original Sublium subscription is left in place. The filte
 No. It is built by Betatech for stores that already run Sublium.
 
 **Will it stop subscriptions from being created?**  
-It is designed not to. Recurring carts and plan meta are not changed during checkout. Price sync runs only after the subscription exists.
+It is designed not to. Official price hooks fail open (original Sublium price on error). Plan meta and subscription groups are never changed.
 
 **Does it work with HPOS?**  
 Yes. Compatibility with WooCommerce custom order tables is declared on `before_woocommerce_init`.
@@ -100,6 +101,9 @@ No. Activate it on a site that already has WooCommerce and Sublium.
 ---
 
 ## Changelog
+
+### 1.0.3
+- Use Sublium’s `sublium_wcs_subscription_product_price` and `sublium_wcs_skip_plan_discount` so stored renewal lines keep the cart unit price
 
 ### 1.0.2
 - Declared WooCommerce High-Performance Order Storage (HPOS) compatibility

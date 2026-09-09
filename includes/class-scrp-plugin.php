@@ -2,12 +2,14 @@
 /**
  * Main plugin class — price sync only.
  *
- * Creation-safe: do not mutate Sublium recurring carts, plan meta, or item
- * payloads during checkout. Those paths can leave recurring carts uncached
- * and Sublium then creates no subscription.
+ * Creation-safe: never throw, never touch plan meta / groups / assignment.
  *
- * Checkout HTML may still show the cart line. Stored renewal totals are
- * copied from the parent order after the subscription already exists.
+ * Recurring totals use Sublium's built-in hooks:
+ * - sublium_wcs_subscription_product_price (base unit from the main cart line)
+ * - sublium_wcs_skip_plan_discount (keep that unit; do not re-discount / divide)
+ * Both run only while calculation_type is recurring_total.
+ *
+ * Parent-order copy after creation is a backup. Checkout HTML is display-only.
  *
  * @package Cart_Renewal_Price_For_Sublium
  */
@@ -32,6 +34,13 @@ class SCRP_Plugin {
 	private static $instance = null;
 
 	/**
+	 * Product IDs whose cart line we fed into recurring calc this request.
+	 *
+	 * @var array<int, bool>
+	 */
+	private $preserve_product_ids = array();
+
+	/**
 	 * Subscription IDs already synced this request.
 	 *
 	 * @var array<int, bool>
@@ -53,6 +62,10 @@ class SCRP_Plugin {
 	 * Constructor.
 	 */
 	private function __construct() {
+		// Official Sublium hooks: feed cart line into recurring calc, then keep it.
+		add_filter( 'sublium_wcs_subscription_product_price', array( $this, 'filter_subscription_product_price' ), 20, 3 );
+		add_filter( 'sublium_wcs_skip_plan_discount', array( $this, 'filter_skip_plan_discount' ), 20, 4 );
+
 		// Display only — does not feed subscription create().
 		add_filter( 'sublium_wcs_woocommerce_cart_item_total', array( $this, 'filter_recurring_total_display' ), 20, 2 );
 
@@ -61,6 +74,64 @@ class SCRP_Plugin {
 		add_filter( 'sublium_wcs_subscription_created', array( $this, 'filter_subscription_created' ), 25, 2 );
 		add_action( 'woocommerce_checkout_order_processed', array( $this, 'on_order_processed' ), 60, 1 );
 		add_action( 'woocommerce_store_api_checkout_order_processed', array( $this, 'on_order_processed' ), 60, 1 );
+	}
+
+	/**
+	 * Substitute the base price Sublium starts from during recurring totals.
+	 *
+	 * @param float      $price   Product price Sublium is about to use.
+	 * @param WC_Product $product Product.
+	 * @param object     $cart    Sublium cart controller (has calculation_type).
+	 * @return float
+	 */
+	public function filter_subscription_product_price( $price, $product, $cart ) {
+		try {
+			$unit = $this->get_recurring_cart_line_unit( $product, $cart, $price );
+			if ( null === $unit ) {
+				return $price;
+			}
+
+			$this->preserve_product_ids[ (int) $product->get_id() ] = true;
+
+			return $unit;
+		} catch ( \Throwable $e ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
+			return $price;
+		}
+	}
+
+	/**
+	 * Keep the cart line unit. Do not apply plan discount or billing-length division.
+	 *
+	 * Only during recurring_total, and only when we have a cart line to preserve.
+	 *
+	 * @param bool       $skip    Whether to skip.
+	 * @param float      $price   Incoming price.
+	 * @param WC_Product $product Product.
+	 * @param mixed      $plan    Plan object.
+	 * @return bool
+	 */
+	public function filter_skip_plan_discount( $skip, $price, $product, $plan ) {
+		try {
+			if ( $skip ) {
+				return $skip;
+			}
+
+			if ( ! $this->is_subscribe_and_save_plan( $plan ) ) {
+				return $skip;
+			}
+
+			if ( ! $product instanceof WC_Product ) {
+				return $skip;
+			}
+
+			if ( empty( $this->preserve_product_ids[ (int) $product->get_id() ] ) ) {
+				return $skip;
+			}
+
+			return true;
+		} catch ( \Throwable $e ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
+			return $skip;
+		}
 	}
 
 	/**
@@ -427,6 +498,84 @@ class SCRP_Plugin {
 	}
 
 	/**
+	 * Cart line unit to feed into Sublium recurring calc, or null to leave Sublium alone.
+	 *
+	 * @param WC_Product  $product Product being priced.
+	 * @param object|null $cart    Sublium cart controller when available.
+	 * @param mixed       $current Current Sublium base price.
+	 * @return float|null
+	 */
+	private function get_recurring_cart_line_unit( $product, $cart, $current ) {
+		if ( ! $this->is_recurring_total_calc( $cart ) ) {
+			return null;
+		}
+
+		if ( ! $product instanceof WC_Product ) {
+			return null;
+		}
+
+		$unit = $this->get_main_cart_unit_price_for_product( $product );
+		if ( null === $unit || $unit <= 0 ) {
+			return null;
+		}
+
+		$current = (float) $current;
+		if ( $current > 0 && $unit >= $current ) {
+			return null;
+		}
+
+		return (float) $unit;
+	}
+
+	/**
+	 * Whether Sublium is rebuilding recurring carts.
+	 *
+	 * @param object|null $cart Sublium cart controller.
+	 * @return bool
+	 */
+	private function is_recurring_total_calc( $cart ) {
+		if ( is_object( $cart ) && isset( $cart->calculation_type ) ) {
+			return 'recurring_total' === $cart->calculation_type;
+		}
+
+		if ( class_exists( '\Sublium_WCS\Includes\Main\Cart' ) ) {
+			$instance = \Sublium_WCS\Includes\Main\Cart::get_instance();
+			if ( is_object( $instance ) && isset( $instance->calculation_type ) ) {
+				return 'recurring_total' === $instance->calculation_type;
+			}
+		}
+
+		return false;
+	}
+
+	/**
+	 * @param mixed $plan Plan object.
+	 * @return bool
+	 */
+	private function is_subscribe_and_save_plan( $plan ) {
+		if ( ! is_object( $plan ) || ! method_exists( $plan, 'get_type' ) ) {
+			return false;
+		}
+
+		return self::PLAN_TYPE_SUBSCRIBE_AND_SAVE === (int) $plan->get_type();
+	}
+
+	/**
+	 * @param array $cart_item Cart item.
+	 * @return bool
+	 */
+	private function cart_item_is_subscribe_and_save( $cart_item ) {
+		if ( empty( $cart_item['sublium_wcs_plan'] ) || ! class_exists( '\Sublium_WCS\Includes\Main\Plans' ) ) {
+			return false;
+		}
+
+		$product = ( isset( $cart_item['data'] ) && $cart_item['data'] instanceof WC_Product ) ? $cart_item['data'] : null;
+		$plan    = \Sublium_WCS\Includes\Main\Plans::get_plan_by_id( $cart_item['sublium_wcs_plan'], $product );
+
+		return $this->is_subscribe_and_save_plan( $plan );
+	}
+
+	/**
 	 * Main cart per-unit line_subtotal for a plan product.
 	 *
 	 * @param WC_Product $product Product.
@@ -452,6 +601,10 @@ class SCRP_Plugin {
 				continue;
 			}
 
+			if ( ! $this->cart_item_is_subscribe_and_save( $cart_item ) ) {
+				continue;
+			}
+
 			if ( $this->should_skip_cart_item( $cart_item ) ) {
 				continue;
 			}
@@ -461,7 +614,18 @@ class SCRP_Plugin {
 			}
 
 			$qty = isset( $cart_item['quantity'] ) ? (float) $cart_item['quantity'] : 0;
-			if ( $qty <= 0 || ! isset( $cart_item['line_subtotal'] ) ) {
+			if ( $qty <= 0 ) {
+				continue;
+			}
+
+			if ( isset( $cart_item['custom_price'] ) && (float) $cart_item['custom_price'] > 0 ) {
+				$custom = (float) $cart_item['custom_price'];
+				if ( $custom > 0 ) {
+					return $custom;
+				}
+			}
+
+			if ( ! isset( $cart_item['line_subtotal'] ) ) {
 				continue;
 			}
 
